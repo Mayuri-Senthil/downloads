@@ -1,26 +1,35 @@
-name: Download debs
+name: Download CuPy Wheels
 on: [push]
 jobs:
   download:
     runs-on: ubuntu-24.04
     steps:
-      - name: Download all gcc deps
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Download all wheels
         run: |
-          mkdir debs
-          cd debs
-          apt-get download gcc gcc-13 gcc-13-base cpp cpp-13 \
-            gcc-x86-64-linux-gnu gcc-13-x86-64-linux-gnu \
-            cpp-x86-64-linux-gnu cpp-13-x86-64-linux-gnu \
-            libgcc-13-dev libgomp1 libitm1 libatomic1 \
-            libasan8 liblsan0 libtsan2 libubsan1 \
-            libhwasan0 libquadmath0 libc-dev-bin \
-            libcrypt-dev rpcsvc-proto binutils-common \
-            libbinutils binutils-x86-64-linux-gnu \
-            libc6-dev linux-libc-dev make binutils
-      - name: Zip debs
-        run: zip -r debs.zip debs/
+          mkdir wheels
+          pip download cupy-cuda13x \
+            --dest wheels \
+            --python-version 3.13 \
+            --platform linux_x86_64 \
+            --only-binary=:all: \
+            --no-cache-dir
+
+      - name: Generate requirements.txt
+        run: |
+          ls wheels/*.whl | xargs -I {} basename {} | sed 's/-cp313.*//' | sed 's/_/==/1' | sed 's/_/-/g' > requirements.txt
+          cat requirements.txt
+
+      - name: Zip everything
+        run: zip -r cupy-cuda13x-wheels.zip wheels/ requirements.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gcc-debs
-          path: debs.zip
+          name: cupy-cuda13x-wheels
+          path: cupy-cuda13x-wheels.zip
+          retention-days: 7
