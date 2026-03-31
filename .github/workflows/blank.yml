@@ -9,20 +9,26 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Install pip tools
+        run: pip install pip --upgrade
+
       - name: Download all wheels
         run: |
           mkdir wheels
           pip download cupy-cuda13x \
             --dest wheels \
             --python-version 3.13 \
-            --platform linux_x86_64 \
+            --implementation cp \
+            --abi cp313 \
+            --platform manylinux2014_x86_64 \
             --only-binary=:all: \
             --no-cache-dir
 
       - name: Generate requirements.txt
         run: |
-          ls wheels/*.whl | xargs -I {} basename {} | sed 's/-cp313.*//' | sed 's/_/==/1' | sed 's/_/-/g' > requirements.txt
-          cat requirements.txt
+          cd wheels
+          ls *.whl > ../requirements.txt
+          cat ../requirements.txt
 
       - name: Zip everything
         run: zip -r cupy-cuda13x-wheels.zip wheels/ requirements.txt
