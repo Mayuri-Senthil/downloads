@@ -1,41 +1,302 @@
-name: Download CuPy Wheels
-on: [push]
+# ============================================================
+# .github/workflows/download-wheels.yml
+#
+# Downloads all Python 3.13 wheels for the conjunction-analysis
+# project on two platforms:
+#   • Windows (win_amd64)
+#   • Ubuntu 24.04 LTS / WSL2-Ubuntu-24.04 (manylinux x86_64)
+#
+# Artifacts are uploaded so you can grab them from the
+# GitHub Actions "Summary" page and use them offline / in WSL.
+# ============================================================
+ 
+name: Download Wheels – Python 3.13 (Windows + Ubuntu 24.04)
+ 
+on:
+  workflow_dispatch:          # run manually from the Actions tab
+  push:
+    branches: [main]
+    paths:
+      - requirements.txt      # re-run whenever deps change
+      - .github/workflows/download-wheels.yml
+ 
+# ── Package list (pinned to tested versions) ──────────────────
+env:
+  # Core runtime deps
+  PACKAGES: >-
+    sgp4==2.25
+    numpy==2.4.3
+    scipy==1.17.1
+    skyfield==1.54
+    astropy==7.2.0
+    Jinja2==3.1.6
+  # Transitive deps that ship binary wheels
+  TRANSITIVE: >-
+    certifi==2026.2.25
+    jplephem==2.24
+    pyerfa==2.0.1.5
+    astropy-iers-data==0.2026.4.13.0.58.2
+    packaging==26.0
+    PyYAML==6.0.3
+    MarkupSafe==3.0.3
+ 
 jobs:
-  download:
-    runs-on: ubuntu-24.04
+ 
+  # ════════════════════════════════════════════════════════════
+  # JOB 1 – Windows wheels (win_amd64)
+  # ════════════════════════════════════════════════════════════
+  wheels-windows:
+    name: 🪟 Windows wheels (win_amd64)
+    runs-on: windows-latest          # Windows Server 2022 runner
+ 
     steps:
-      - name: Setup Python 3.13
+      - name: Checkout repository
+        uses: actions/checkout@v4
+ 
+      # ── Install Python 3.13 ──────────────────────────────────
+      - name: Set up Python 3.13
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
-
-      - name: Install pip tools
-        run: pip install pip --upgrade
-
-      - name: Download all wheels
+          python-version: "3.13"
+ 
+      - name: Verify Python version
+        run: python --version
+ 
+      # ── Upgrade pip / wheel tooling ──────────────────────────
+      - name: Upgrade pip, wheel, setuptools
         run: |
-          mkdir wheels
-          pip download cupy-cuda13x \
-            --dest wheels \
-            --python-version 3.13 \
-            --implementation cp \
-            --abi cp313 \
-            --platform manylinux2014_x86_64 \
-            --only-binary=:all: \
-            --no-cache-dir
-
-      - name: Generate requirements.txt
+          python -m pip install --upgrade pip wheel setuptools
+ 
+      # ── Download all wheels – core packages ─────────────────
+      # --only-binary=:all:  → fail loudly if no binary wheel exists
+      # --python-version     → target CPython 3.13
+      # --platform           → win_amd64
+      # --no-deps            → we handle deps explicitly below
+      - name: Download core wheels (win_amd64)
+        shell: pwsh
         run: |
-          cd wheels
-          ls *.whl > ../requirements.txt
-          cat ../requirements.txt
-
-      - name: Zip everything
-        run: zip -r cupy-cuda13x-wheels.zip wheels/ requirements.txt
-
-      - name: Upload artifact
+          $packages = "${{ env.PACKAGES }}" -split '\s+' | Where-Object { $_ }
+          New-Item -ItemType Directory -Force -Path wheels\windows | Out-Null
+          foreach ($pkg in $packages) {
+            Write-Host "==> Downloading $pkg"
+            python -m pip download `
+              --only-binary=:all: `
+              --python-version 3.13 `
+              --platform win_amd64 `
+              --implementation cp `
+              --abi cp313 `
+              --dest wheels\windows `
+              --no-deps `
+              $pkg
+          }
+ 
+      # ── Download transitive / pure-Python wheels ─────────────
+      # Some packages (certifi, packaging, astropy-iers-data) are
+      # pure Python (py3-none-any) – download without platform lock.
+      - name: Download transitive wheels (win_amd64 + pure-Python)
+        shell: pwsh
+        run: |
+          $packages = "${{ env.TRANSITIVE }}" -split '\s+' | Where-Object { $_ }
+          foreach ($pkg in $packages) {
+            Write-Host "==> Downloading transitive $pkg"
+            python -m pip download `
+              --dest wheels\windows `
+              --no-deps `
+              $pkg
+          }
+ 
+      # ── Verify all expected wheels are present ───────────────
+      - name: List downloaded wheels (Windows)
+        shell: pwsh
+        run: |
+          Write-Host "`n── Windows wheels ───────────────────────────────────────"
+          Get-ChildItem wheels\windows -Filter *.whl |
+            Sort-Object Name |
+            ForEach-Object { Write-Host "  $($_.Name)" }
+          $count = (Get-ChildItem wheels\windows -Filter *.whl).Count
+          Write-Host "`n  Total: $count wheel(s)"
+ 
+      # ── Generate requirements-windows.txt ───────────────────
+      - name: Generate requirements-windows.txt
+        shell: pwsh
+        run: |
+          $lines = @()
+          Get-ChildItem wheels\windows -Filter *.whl | Sort-Object Name | ForEach-Object {
+            $lines += $_.Name
+          }
+          $lines | Set-Content wheels\windows\requirements-windows.txt
+          Write-Host "requirements-windows.txt written."
+ 
+      # ── Upload artifact ──────────────────────────────────────
+      - name: Upload Windows wheels artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cupy-cuda13x-wheels
-          path: cupy-cuda13x-wheels.zip
-          retention-days: 7
+          name: wheels-python313-windows-amd64
+          path: wheels/windows/
+          retention-days: 30
+          if-no-files-found: error
+ 
+ 
+  # ════════════════════════════════════════════════════════════
+  # JOB 2 – Ubuntu 24.04 / WSL2 wheels (manylinux x86_64)
+  # ════════════════════════════════════════════════════════════
+  wheels-ubuntu:
+    name: 🐧 Ubuntu 24.04 / WSL2 wheels (manylinux x86_64)
+    runs-on: ubuntu-24.04            # matches WSL Ubuntu 24.04 LTS
+ 
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+ 
+      # ── Install Python 3.13 ──────────────────────────────────
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+ 
+      - name: Verify Python version
+        run: python --version && uname -r
+ 
+      # ── Upgrade pip tooling ──────────────────────────────────
+      - name: Upgrade pip, wheel, setuptools
+        run: python -m pip install --upgrade pip wheel setuptools
+ 
+      # ── Download manylinux wheels ────────────────────────────
+      # manylinux_2_17 is the broadest compatible tag that works on
+      # Ubuntu 24.04 (glibc 2.39). We request manylinux_2_17 so the
+      # wheels also work on older distros and in WSL1.
+      - name: Download core wheels (manylinux_2_17_x86_64)
+        run: |
+          mkdir -p wheels/ubuntu
+          for pkg in ${{ env.PACKAGES }}; do
+            echo "==> Downloading $pkg"
+            python -m pip download \
+              --only-binary=:all: \
+              --python-version 3.13 \
+              --platform manylinux_2_17_x86_64 \
+              --implementation cp \
+              --abi cp313 \
+              --dest wheels/ubuntu \
+              --no-deps \
+              "$pkg"
+          done
+ 
+      # ── Transitive / pure-Python wheels ──────────────────────
+      - name: Download transitive wheels (ubuntu + pure-Python)
+        run: |
+          for pkg in ${{ env.TRANSITIVE }}; do
+            echo "==> Downloading transitive $pkg"
+            python -m pip download \
+              --dest wheels/ubuntu \
+              --no-deps \
+              "$pkg"
+          done
+ 
+      # ── Verify ───────────────────────────────────────────────
+      - name: List downloaded wheels (Ubuntu)
+        run: |
+          echo ""
+          echo "── Ubuntu/WSL2 wheels ────────────────────────────────────"
+          ls -1 wheels/ubuntu/*.whl | sort | while read f; do
+            echo "  $(basename $f)"
+          done
+          echo ""
+          echo "  Total: $(ls wheels/ubuntu/*.whl | wc -l) wheel(s)"
+ 
+      # ── Generate install script for WSL ─────────────────────
+      - name: Generate offline-install.sh for WSL
+        run: |
+          cat > wheels/ubuntu/offline-install.sh << 'EOF'
+          #!/usr/bin/env bash
+          # ─────────────────────────────────────────────────────────────
+          # Offline wheel installer for WSL Ubuntu 24.04 / Python 3.13
+          # Usage: bash offline-install.sh
+          # ─────────────────────────────────────────────────────────────
+          set -euo pipefail
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ 
+          echo "Installing conjunction-analysis dependencies from local wheels …"
+          pip install \
+            --no-index \
+            --find-links "$SCRIPT_DIR" \
+            sgp4 \
+            numpy \
+            scipy \
+            skyfield \
+            astropy \
+            Jinja2
+ 
+          echo ""
+          echo "✓ Done. Verify with: pip list | grep -E 'sgp4|numpy|scipy|skyfield|astropy|Jinja2'"
+          EOF
+          chmod +x wheels/ubuntu/offline-install.sh
+          echo "offline-install.sh written."
+ 
+      # ── Generate requirements-ubuntu.txt ────────────────────
+      - name: Generate requirements-ubuntu.txt
+        run: |
+          ls -1 wheels/ubuntu/*.whl | xargs -I{} basename {} \
+            | sort > wheels/ubuntu/requirements-ubuntu.txt
+          echo "requirements-ubuntu.txt written."
+ 
+      # ── Upload artifact ──────────────────────────────────────
+      - name: Upload Ubuntu/WSL2 wheels artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-python313-ubuntu2404-x86_64
+          path: wheels/ubuntu/
+          retention-days: 30
+          if-no-files-found: error
+ 
+ 
+  # ════════════════════════════════════════════════════════════
+  # JOB 3 – Summary report (runs after both jobs succeed)
+  # ════════════════════════════════════════════════════════════
+  summary:
+    name: 📋 Wheel Download Summary
+    needs: [wheels-windows, wheels-ubuntu]
+    runs-on: ubuntu-latest
+    if: always()
+ 
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-python313-windows-amd64
+          path: summary/windows
+        continue-on-error: true
+ 
+      - name: Download Ubuntu artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-python313-ubuntu2404-x86_64
+          path: summary/ubuntu
+        continue-on-error: true
+ 
+      - name: Print summary
+        run: |
+          echo "## 🛰️ Conjunction Analysis – Wheel Download Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+ 
+          echo "### 🪟 Windows (win_amd64, Python 3.13)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls summary/windows/*.whl 2>/dev/null | xargs -I{} basename {} | sort \
+            >> $GITHUB_STEP_SUMMARY || echo "(none)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+ 
+          echo "### 🐧 Ubuntu 24.04 / WSL2 (manylinux_2_17_x86_64, Python 3.13)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls summary/ubuntu/*.whl 2>/dev/null | xargs -I{} basename {} | sort \
+            >> $GITHUB_STEP_SUMMARY || echo "(none)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+ 
+          echo "### Offline install" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo '# Windows (PowerShell):' >> $GITHUB_STEP_SUMMARY
+          echo 'pip install --no-index --find-links . sgp4 numpy scipy skyfield astropy Jinja2' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '# WSL / Ubuntu:' >> $GITHUB_STEP_SUMMARY
+          echo 'bash offline-install.sh' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
