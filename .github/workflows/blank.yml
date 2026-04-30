@@ -12,34 +12,26 @@ steps:
   - name: Setup Python 3.13
     uses: actions/setup-python@v5
     with:
-      python-version: '3.13'
+      python-version: "3.13"
 
   - name: Upgrade pip tooling
-    run: |
-      python -m pip install --upgrade pip setuptools wheel
+    run: python -m pip install --upgrade pip setuptools wheel
 
   - name: Create wheelhouse directory
     run: mkdir wheelhouse
 
-  - name: Download Nuitka + dependencies (no install)
-    run: |
-      pip download nuitka ordered-set zstandard ^
-        --dest wheelhouse ^
-        --only-binary=:all:
+  - name: Download Nuitka and dependencies
+    run: >
+      pip download nuitka ordered-set zstandard
+      --dest wheelhouse
+      --only-binary=:all:
 
-  # Optional: include your own project deps
-  - name: Download project dependencies (optional)
-    run: |
-      if exist requirements.txt (
-        pip download -r requirements.txt --dest wheelhouse --only-binary=:all:
-      )
-
-  # Include pip/setuptools/wheel explicitly
   - name: Download build tools
-    run: |
-      pip download pip setuptools wheel --dest wheelhouse --only-binary=:all:
+    run: >
+      pip download pip setuptools wheel
+      --dest wheelhouse
+      --only-binary=:all:
 
-  # Create install script for offline machine
   - name: Create offline install script
     run: |
       echo @echo off > wheelhouse\install_offline.bat
