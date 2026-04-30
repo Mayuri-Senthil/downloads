@@ -18,7 +18,7 @@ on:
 
 jobs:
   download-wheels:
-    runs-on: windows-latest  # Build on Windows for Windows-compatible wheels
+    runs-on: windows-latest  # Must run on Windows to get Windows-compatible wheels
 
     steps:
       # ── 1. Setup Python 3.13 ─────────────────────────────────────────────
@@ -35,104 +35,151 @@ jobs:
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
-      # ── 4. Download Nuitka + all its dependencies ─────────────────────────
-      - name: Download Nuitka wheels
+      # ── 4. Download Nuitka + its pure-Python dependencies ────────────────
+      #
+      #   KEY FIX: Nuitka is pure-Python — it is only distributed as a
+      #   .tar.gz or universal .whl, never as a platform-specific binary.
+      #   Using --platform / --only-binary / --abi with a pure-Python package
+      #   causes pip to find zero matching distributions (the error you saw).
+      #
+      #   Rule of thumb:
+      #     Pure-Python packages  → no platform/abi flags (this step)
+      #     Binary packages       → --platform win_amd64 --abi cp313 (step 5)
+      #
+      - name: Download Nuitka and pure-Python dependencies
         run: |
-          python -m pip download nuitka `
-            --dest wheels/ `
-            --python-version ${{ github.event.inputs.python_version }} `
-            --platform win_amd64 `
-            --only-binary=:all: `
-            --abi cp313
-        # Note: Some pure-python packages may not have binary wheels.
-        # We fall back without --only-binary for those below.
-
-      # ── 5. Download Nuitka (allow source fallback for pure-python pkgs) ───
-      - name: Download Nuitka (with source fallback)
-        run: |
-          python -m pip download nuitka `
-            --dest wheels/
-        # This catches any pure-python deps missed by the binary-only pass
-
-      # ── 6. Download ordered-set (Nuitka runtime dep) ─────────────────────
-      - name: Download ordered-set
-        run: |
-          python -m pip download ordered-set `
+          python -m pip download nuitka ordered-set `
             --dest wheels/
 
-      # ── 7. Download extra user-specified packages ─────────────────────────
-      - name: Download extra packages
+      # ── 5. Download extra binary packages (numpy, pandas, etc.) ──────────
+      #
+      #   For packages that ship native .dll/.pyd extensions (numpy, pandas,
+      #   scipy, Pillow), we target win_amd64 explicitly so pip fetches
+      #   the Windows wheel rather than a generic sdist.
+      #
+      #   We try binary-first; if pip returns an error (pure-Python package
+      #   given here by mistake), we fall back to a plain download.
+      #
+      - name: Download extra binary packages
         if: ${{ github.event.inputs.extra_packages != '' }}
+        shell: pwsh
         run: |
-          $packages = "${{ github.event.inputs.extra_packages }}"
-          python -m pip download $packages.Split(' ') `
-            --dest wheels/ `
-            --platform win_amd64 `
-            --python-version ${{ github.event.inputs.python_version }} `
-            --abi cp313
+          $pkgs = "${{ github.event.inputs.extra_packages }}".Trim() -split '\s+'
+          foreach ($pkg in $pkgs) {
+            Write-Host "Downloading: $pkg"
+            python -m pip download $pkg `
+              --dest wheels/ `
+              --platform win_amd64 `
+              --python-version ${{ github.event.inputs.python_version }} `
+              --abi cp313
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "No binary wheel for $pkg — retrying as pure-Python..."
+              python -m pip download $pkg --dest wheels/
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Failed to download $pkg. Check the package name."
+                exit 1
+              }
+            }
+          }
 
-      # ── 8. Download from requirements.txt (if provided) ───────────────────
+      # ── 6. Download from requirements.txt (if provided) ───────────────────
       - name: Checkout repo (needed if requirements.txt is in the repo)
         if: ${{ github.event.inputs.requirements_file != '' }}
         uses: actions/checkout@v4
 
       - name: Download requirements.txt packages
         if: ${{ github.event.inputs.requirements_file != '' }}
+        shell: pwsh
         run: |
-          python -m pip download `
-            -r ${{ github.event.inputs.requirements_file }} `
-            --dest wheels/ `
-            --platform win_amd64 `
-            --python-version ${{ github.event.inputs.python_version }} `
-            --abi cp313
+          $failed = @()
+          $reqs = Get-Content "${{ github.event.inputs.requirements_file }}" `
+            | Where-Object { $_ -notmatch '^\s*#' -and $_.Trim() -ne '' }
 
-      # ── 9. Download MinGW64 (C compiler Nuitka needs) ────────────────────
-      - name: Download MinGW64 for Nuitka
-        shell: powershell
+          foreach ($req in $reqs) {
+            python -m pip download $req `
+              --dest wheels/ `
+              --platform win_amd64 `
+              --python-version ${{ github.event.inputs.python_version }} `
+              --abi cp313
+            if ($LASTEXITCODE -ne 0) { $failed += $req }
+          }
+
+          if ($failed.Count -gt 0) {
+            Write-Host "Pure-Python fallback for: $($failed -join ', ')"
+            foreach ($req in $failed) {
+              python -m pip download $req --dest wheels/
+            }
+          }
+
+      # ── 7. Deduplicate: remove sdists where a .whl already exists ─────────
+      - name: Remove duplicate source distributions
+        shell: pwsh
         run: |
-          $mingwUrl = "https://github.com/niXman/mingw-builds-binaries/releases/download/14.2.0-rt_v12-rev0/x86_64-14.2.0-release-posix-seh-ucrt-rt_v12-rev0.7z"
-          $outFile = "mingw64.7z"
+          $whlNames = (Get-ChildItem wheels\*.whl -ErrorAction SilentlyContinue).BaseName `
+            | ForEach-Object { ($_ -split '-')[0].ToLower() }
+
+          Get-ChildItem wheels\ -Include *.tar.gz, *.zip -Recurse | ForEach-Object {
+            $pkgName = ($_.BaseName -split '-')[0].ToLower()
+            if ($whlNames -contains $pkgName) {
+              Write-Host "Removing duplicate sdist: $($_.Name)"
+              Remove-Item $_.FullName
+            }
+          }
+
+      # ── 8. Download MinGW64 (C compiler Nuitka needs) ────────────────────
+      - name: Download MinGW64
+        shell: pwsh
+        run: |
+          $url = "https://github.com/niXman/mingw-builds-binaries/releases/download/14.2.0-rt_v12-rev0/x86_64-14.2.0-release-posix-seh-ucrt-rt_v12-rev0.7z"
           Write-Host "Downloading MinGW64..."
-          Invoke-WebRequest -Uri $mingwUrl -OutFile $outFile
-          Write-Host "Download complete: $outFile"
+          Invoke-WebRequest -Uri $url -OutFile mingw64.7z -UseBasicParsing
+          Write-Host "Done."
 
-      # ── 10. List all downloaded files ─────────────────────────────────────
+      # ── 9. List downloaded wheels ─────────────────────────────────────────
       - name: List downloaded wheels
+        shell: pwsh
         run: |
-          echo "=== Wheels downloaded ==="
-          Get-ChildItem wheels/ | Select-Object Name, Length | Format-Table
-          echo ""
-          echo "Total files: $((Get-ChildItem wheels/).Count)"
+          Write-Host "=== Downloaded files ==="
+          Get-ChildItem wheels\ | Select-Object Name, @{N='KB';E={[math]::Round($_.Length/1KB,1)}} | Format-Table
+          Write-Host "Total: $((Get-ChildItem wheels\).Count) files"
 
-      # ── 11. Generate install script for the air-gapped machine ───────────
-      - name: Generate offline install script
-        shell: powershell
+      # ── 10. Generate offline install script ───────────────────────────────
+      - name: Generate install_offline.bat
+        shell: pwsh
         run: |
-          $script = @"
+          $pyver = "${{ github.event.inputs.python_version }}"
+          @"
           @echo off
-          REM ============================================================
-          REM  Offline Nuitka Installer — generated by GitHub Actions
-          REM  Python ${{ github.event.inputs.python_version }} / Windows x64
-          REM ============================================================
+          REM ================================================================
+          REM  Offline Nuitka Installer
+          REM  Python $pyver / Windows x64
+          REM  Generated by GitHub Actions
+          REM ================================================================
 
-          echo [1/4] Upgrading pip...
-          python -m pip install --upgrade pip --no-index --find-links=wheels\
+          echo [1/5] Checking Python...
+          python --version
+          if %ERRORLEVEL% NEQ 0 (
+              echo ERROR: Python not found. Install Python $pyver first.
+              pause & exit /b 1
+          )
 
-          echo [2/4] Installing Nuitka and dependencies...
+          echo [2/5] Upgrading pip from local wheels...
+          python -m pip install pip --no-index --find-links=wheels\
+
+          echo [3/5] Installing Nuitka...
           python -m pip install nuitka --no-index --find-links=wheels\
+          if %ERRORLEVEL% NEQ 0 ( echo ERROR: Failed. & pause & exit /b 1 )
 
-          echo [3/4] Verifying Nuitka install...
+          echo [4/5] Verifying...
           python -m nuitka --version
 
-          echo [4/4] Done! You can now compile with:
+          echo [5/5] Done! Compile your project with:
           echo   python -m nuitka --onefile --mingw64 --mingw64-path=C:\mingw64 your_script.py
           pause
-          "@
-          $script | Out-File -FilePath "install_offline.bat" -Encoding ASCII
-          Write-Host "install_offline.bat generated."
+          "@ | Out-File -FilePath install_offline.bat -Encoding ASCII
 
-      # ── 12. Upload everything as a single artifact ────────────────────────
-      - name: Upload wheels artifact
+      # ── 11. Upload artifact ───────────────────────────────────────────────
+      - name: Upload offline bundle
         uses: actions/upload-artifact@v4
         with:
           name: nuitka-offline-bundle-py313
@@ -142,14 +189,10 @@ jobs:
             install_offline.bat
           retention-days: 30
 
-      # ── 13. Summary ───────────────────────────────────────────────────────
+      # ── 12. Summary ───────────────────────────────────────────────────────
       - name: Print summary
+        shell: pwsh
         run: |
-          echo "✅ Bundle ready: nuitka-offline-bundle-py313"
-          echo ""
-          echo "Contents:"
-          echo "  wheels/           ← all .whl files (pip install offline)"
-          echo "  mingw64.7z        ← C compiler for Nuitka"
-          echo "  install_offline.bat ← run this on the air-gapped machine"
-          echo ""
-          echo "Transfer the artifact to your air-gapped machine and run install_offline.bat"
+          $n = (Get-ChildItem wheels\).Count
+          Write-Host "Bundle ready: nuitka-offline-bundle-py313"
+          Write-Host "  wheels\  ($n files), mingw64.7z, install_offline.bat"
