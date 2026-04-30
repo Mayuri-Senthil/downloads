@@ -23,13 +23,13 @@ jobs:
         run: >
           pip download nuitka ordered-set zstandard
           --dest wheelhouse
-          --only-binary=:all:
+          
     
       - name: Download build tools
         run: >
           pip download pip setuptools wheel
           --dest wheelhouse
-          --only-binary=:all:
+          
     
       - name: Create offline install script
         run: |
