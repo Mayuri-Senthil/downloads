@@ -1,325 +1,155 @@
-# ============================================================
-# .github/workflows/download-wheels.yml
-#
-# Downloads all Python 3.13 wheels for the conjunction-analysis
-# project on two platforms:
-#   • Windows (win_amd64)
-#   • Ubuntu 24.04 LTS / WSL2 (x86_64)
-#
-# VERIFIED wheel tags (all sourced from PyPI file listings):
-#
-#  Package      | Linux tag            | ABI    | Pure?
-#  -------------|----------------------|--------|------
-#  sgp4         | manylinux_2_17       | cp313  | no
-#  numpy        | manylinux_2_28       | cp313  | no  (changed in 2.3+)
-#  scipy        | manylinux_2_28       | cp313  | no  (changed in 1.17+)
-#  skyfield     | none-any             | none   | YES (pure-Python)
-#  jplephem     | none-any             | none   | YES (pure-Python)
-#  pyerfa       | manylinux_2_17       | abi3   | no  (stable ABI)
-#  astropy      | manylinux_2_17+_2_28 | abi3   | no  (stable ABI)
-#
-# STRATEGY: let pip resolve tags naturally on the native runner
-# instead of hard-coding --platform. Override only where needed.
-# ============================================================
-
-name: Download Wheels – Python 3.13 (Windows + Ubuntu 24.04)
+name: Download Nuitka Wheels (Python 3.13)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - requirements-windows.txt
-      - requirements-ubuntu.txt
-      - .github/workflows/download-wheels.yml
-
-env:
-  PY_VERSION: "3.13"
-
-  # Pinned versions — verified on PyPI 2026-04-13
-  SGP4_VER:          "sgp4==2.25"
-  NUMPY_VER:         "numpy==2.4.4"
-  SCIPY_VER:         "scipy==1.17.1"
-  SKYFIELD_VER:      "skyfield==1.54"
-  ASTROPY_VER:       "astropy==7.2.0"
-  JINJA2_VER:        "Jinja2==3.1.6"
-  JPLEPHEM_VER:      "jplephem==2.24"
-  PYERFA_VER:        "pyerfa==2.0.1.5"
-  CERTIFI_VER:       "certifi==2026.2.25"
-  IERS_VER:          "astropy-iers-data==0.2026.4.13.0.58.2"
-  PACKAGING_VER:     "packaging==26.0"
-  PYYAML_VER:        "PyYAML==6.0.3"
-  MARKUPSAFE_VER:    "MarkupSafe==3.0.3"
+    inputs:
+      python_version:
+        description: "Python 3.13.x patch version"
+        required: false
+        default: "3.13.3"
+      extra_packages:
+        description: "Extra pip packages to download (space-separated, e.g. numpy pandas)"
+        required: false
+        default: ""
+      requirements_file:
+        description: "Path to requirements.txt (leave blank if none)"
+        required: false
+        default: ""
 
 jobs:
-
-  # ════════════════════════════════════════════════════════════
-  # JOB 1 – Windows (win_amd64)
-  #
-  # Run on windows-latest so pip naturally resolves win_amd64
-  # wheels. No need to pass --platform at all.
-  # ════════════════════════════════════════════════════════════
-  wheels-windows:
-    name: 🪟 Windows wheels (win_amd64, cp313)
-    runs-on: windows-latest
+  download-wheels:
+    runs-on: windows-latest  # Build on Windows for Windows-compatible wheels
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.13
+      # ── 1. Setup Python 3.13 ─────────────────────────────────────────────
+      - name: Set up Python ${{ github.event.inputs.python_version }}
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PY_VERSION }}
+          python-version: ${{ github.event.inputs.python_version }}
 
+      # ── 2. Verify Python version ──────────────────────────────────────────
       - name: Verify Python version
         run: python --version
 
+      # ── 3. Upgrade pip ───────────────────────────────────────────────────
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
-      - name: Create output directory
-        run: New-Item -ItemType Directory -Force wheels\windows
-        shell: pwsh
-
-      # pip download on a Windows runner natively resolves win_amd64
-      # wheels — no --platform flag needed or wanted.
-      - name: Download all wheels (Windows native resolution)
-        shell: pwsh
+      # ── 4. Download Nuitka + all its dependencies ─────────────────────────
+      - name: Download Nuitka wheels
         run: |
-          $packages = @(
-            "${{ env.SGP4_VER }}",
-            "${{ env.NUMPY_VER }}",
-            "${{ env.SCIPY_VER }}",
-            "${{ env.SKYFIELD_VER }}",
-            "${{ env.ASTROPY_VER }}",
-            "${{ env.JINJA2_VER }}",
-            "${{ env.JPLEPHEM_VER }}",
-            "${{ env.PYERFA_VER }}",
-            "${{ env.CERTIFI_VER }}",
-            "${{ env.IERS_VER }}",
-            "${{ env.PACKAGING_VER }}",
-            "${{ env.PYYAML_VER }}",
-            "${{ env.MARKUPSAFE_VER }}"
-          )
-          foreach ($pkg in $packages) {
-            Write-Host "==> Downloading $pkg"
-            python -m pip download `
-              --only-binary=:all: `
-              --dest wheels\windows `
-              --no-deps `
-              $pkg
-            if ($LASTEXITCODE -ne 0) {
-              Write-Error "FAILED: $pkg"
-              exit 1
-            }
-          }
+          python -m pip download nuitka `
+            --dest wheels/ `
+            --python-version ${{ github.event.inputs.python_version }} `
+            --platform win_amd64 `
+            --only-binary=:all: `
+            --abi cp313
+        # Note: Some pure-python packages may not have binary wheels.
+        # We fall back without --only-binary for those below.
 
-      - name: List downloaded wheels
-        shell: pwsh
+      # ── 5. Download Nuitka (allow source fallback for pure-python pkgs) ───
+      - name: Download Nuitka (with source fallback)
         run: |
-          Write-Host ""
-          Write-Host "── Windows wheels ────────────────────────────────────"
-          Get-ChildItem wheels\windows -Filter *.whl | Sort-Object Name |
-            ForEach-Object { Write-Host "  $($_.Name)" }
-          $n = (Get-ChildItem wheels\windows -Filter *.whl).Count
-          Write-Host ""
-          Write-Host "  Total: $n wheel(s)"
+          python -m pip download nuitka `
+            --dest wheels/
+        # This catches any pure-python deps missed by the binary-only pass
 
-      - name: Smoke-test install into fresh venv
-        shell: pwsh
+      # ── 6. Download ordered-set (Nuitka runtime dep) ─────────────────────
+      - name: Download ordered-set
         run: |
-          python -m venv test_venv
-          test_venv\Scripts\pip install --no-index --find-links wheels\windows `
-            sgp4 numpy scipy skyfield astropy Jinja2
-          test_venv\Scripts\python -c "
-          import sgp4, numpy, scipy, skyfield, astropy, jinja2
-          print('sgp4   ', sgp4.__version__)
-          print('numpy  ', numpy.__version__)
-          print('scipy  ', scipy.__version__)
-          print('astropy', astropy.__version__)
-          print('OK - all imports successful')
-          "
+          python -m pip download ordered-set `
+            --dest wheels/
 
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-python313-windows-amd64
-          path: wheels/windows/
-          retention-days: 30
-          if-no-files-found: error
-
-
-  # ════════════════════════════════════════════════════════════
-  # JOB 2 – Ubuntu 24.04 / WSL2 (x86_64)
-  #
-  # Run on ubuntu-24.04 so pip naturally resolves manylinux
-  # wheels appropriate for glibc 2.39. No --platform needed.
-  #
-  # Wheel tags pip will pick on this runner:
-  #   sgp4    → manylinux_2_17 (cp313)
-  #   numpy   → manylinux_2_28 (cp313)   ← changed in 2.3+
-  #   scipy   → manylinux_2_28 (cp313)   ← changed in 1.17+
-  #   pyerfa  → manylinux_2_17 (abi3)
-  #   astropy → manylinux_2_17+_2_28 (abi3)
-  #   skyfield, jplephem → py3-none-any
-  # ════════════════════════════════════════════════════════════
-  wheels-ubuntu:
-    name: 🐧 Ubuntu 24.04 / WSL2 wheels (x86_64, cp313)
-    runs-on: ubuntu-24.04
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.13
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PY_VERSION }}
-
-      - name: Verify Python + glibc
+      # ── 7. Download extra user-specified packages ─────────────────────────
+      - name: Download extra packages
+        if: ${{ github.event.inputs.extra_packages != '' }}
         run: |
-          python --version
-          echo "glibc: $(ldd --version | head -1)"
-          echo "kernel: $(uname -r)"
+          $packages = "${{ github.event.inputs.extra_packages }}"
+          python -m pip download $packages.Split(' ') `
+            --dest wheels/ `
+            --platform win_amd64 `
+            --python-version ${{ github.event.inputs.python_version }} `
+            --abi cp313
 
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
+      # ── 8. Download from requirements.txt (if provided) ───────────────────
+      - name: Checkout repo (needed if requirements.txt is in the repo)
+        if: ${{ github.event.inputs.requirements_file != '' }}
+        uses: actions/checkout@v4
 
-      - name: Create output directory
-        run: mkdir -p wheels/ubuntu
-
-      # pip download on ubuntu-24.04 natively resolves the correct
-      # manylinux tags for each package. No --platform override needed.
-      - name: Download all wheels (Ubuntu native resolution)
+      - name: Download requirements.txt packages
+        if: ${{ github.event.inputs.requirements_file != '' }}
         run: |
-          set -euo pipefail
-          packages=(
-            "${{ env.SGP4_VER }}"
-            "${{ env.NUMPY_VER }}"
-            "${{ env.SCIPY_VER }}"
-            "${{ env.SKYFIELD_VER }}"
-            "${{ env.ASTROPY_VER }}"
-            "${{ env.JINJA2_VER }}"
-            "${{ env.JPLEPHEM_VER }}"
-            "${{ env.PYERFA_VER }}"
-            "${{ env.CERTIFI_VER }}"
-            "${{ env.IERS_VER }}"
-            "${{ env.PACKAGING_VER }}"
-            "${{ env.PYYAML_VER }}"
-            "${{ env.MARKUPSAFE_VER }}"
-          )
-          for pkg in "${packages[@]}"; do
-            echo "==> Downloading $pkg"
-            python -m pip download \
-              --only-binary=:all: \
-              --dest wheels/ubuntu \
-              --no-deps \
-              "$pkg"
-          done
+          python -m pip download `
+            -r ${{ github.event.inputs.requirements_file }} `
+            --dest wheels/ `
+            --platform win_amd64 `
+            --python-version ${{ github.event.inputs.python_version }} `
+            --abi cp313
 
+      # ── 9. Download MinGW64 (C compiler Nuitka needs) ────────────────────
+      - name: Download MinGW64 for Nuitka
+        shell: powershell
+        run: |
+          $mingwUrl = "https://github.com/niXman/mingw-builds-binaries/releases/download/14.2.0-rt_v12-rev0/x86_64-14.2.0-release-posix-seh-ucrt-rt_v12-rev0.7z"
+          $outFile = "mingw64.7z"
+          Write-Host "Downloading MinGW64..."
+          Invoke-WebRequest -Uri $mingwUrl -OutFile $outFile
+          Write-Host "Download complete: $outFile"
+
+      # ── 10. List all downloaded files ─────────────────────────────────────
       - name: List downloaded wheels
         run: |
+          echo "=== Wheels downloaded ==="
+          Get-ChildItem wheels/ | Select-Object Name, Length | Format-Table
           echo ""
-          echo "── Ubuntu/WSL2 wheels ────────────────────────────────"
-          ls -1 wheels/ubuntu/*.whl | sort | xargs -I{} basename {}
-          echo ""
-          echo "Total: $(ls wheels/ubuntu/*.whl | wc -l) wheel(s)"
+          echo "Total files: $((Get-ChildItem wheels/).Count)"
 
-      - name: Smoke-test install into fresh venv
+      # ── 11. Generate install script for the air-gapped machine ───────────
+      - name: Generate offline install script
+        shell: powershell
         run: |
-          python -m venv test_venv
-          test_venv/bin/pip install --no-index --find-links wheels/ubuntu \
-            sgp4 numpy scipy skyfield astropy Jinja2
-          test_venv/bin/python -c "
-          import sgp4, numpy, scipy, skyfield, astropy, jinja2
-          print('sgp4   ', sgp4.__version__)
-          print('numpy  ', numpy.__version__)
-          print('scipy  ', scipy.__version__)
-          print('astropy', astropy.__version__)
-          print('OK - all imports successful')
-          "
+          $script = @"
+          @echo off
+          REM ============================================================
+          REM  Offline Nuitka Installer — generated by GitHub Actions
+          REM  Python ${{ github.event.inputs.python_version }} / Windows x64
+          REM ============================================================
 
-      - name: Generate offline-install.sh
-        run: |
-          cat > wheels/ubuntu/offline-install.sh << 'EOF'
-          #!/usr/bin/env bash
-          # ────────────────────────────────────────────────────
-          # Offline installer for Ubuntu 24.04 / WSL2, Python 3.13
-          # Usage: bash offline-install.sh
-          # ────────────────────────────────────────────────────
-          set -euo pipefail
-          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          echo "Installing from: $DIR"
-          pip install \
-            --no-index \
-            --find-links "$DIR" \
-            sgp4 numpy scipy skyfield astropy Jinja2
-          echo ""
-          python -c "
-          import sgp4, numpy, scipy, skyfield, astropy, jinja2
-          print('OK:', sgp4.__version__, numpy.__version__, scipy.__version__)
-          "
-          EOF
-          chmod +x wheels/ubuntu/offline-install.sh
+          echo [1/4] Upgrading pip...
+          python -m pip install --upgrade pip --no-index --find-links=wheels\
 
-      - name: Upload Ubuntu/WSL2 artifact
+          echo [2/4] Installing Nuitka and dependencies...
+          python -m pip install nuitka --no-index --find-links=wheels\
+
+          echo [3/4] Verifying Nuitka install...
+          python -m nuitka --version
+
+          echo [4/4] Done! You can now compile with:
+          echo   python -m nuitka --onefile --mingw64 --mingw64-path=C:\mingw64 your_script.py
+          pause
+          "@
+          $script | Out-File -FilePath "install_offline.bat" -Encoding ASCII
+          Write-Host "install_offline.bat generated."
+
+      # ── 12. Upload everything as a single artifact ────────────────────────
+      - name: Upload wheels artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-python313-ubuntu2404-x86_64
-          path: wheels/ubuntu/
+          name: nuitka-offline-bundle-py313
+          path: |
+            wheels/
+            mingw64.7z
+            install_offline.bat
           retention-days: 30
-          if-no-files-found: error
 
-
-  # ════════════════════════════════════════════════════════════
-  # JOB 3 – Summary
-  # ════════════════════════════════════════════════════════════
-  summary:
-    name: 📋 Summary
-    needs: [wheels-windows, wheels-ubuntu]
-    runs-on: ubuntu-latest
-    if: always()
-
-    steps:
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: wheels-python313-windows-amd64
-          path: summary/windows
-        continue-on-error: true
-
-      - name: Download Ubuntu artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: wheels-python313-ubuntu2404-x86_64
-          path: summary/ubuntu
-        continue-on-error: true
-
-      - name: Write step summary
+      # ── 13. Summary ───────────────────────────────────────────────────────
+      - name: Print summary
         run: |
-          echo "## 🛰️ Conjunction Analysis — Wheel Summary" >> $GITHUB_STEP_SUMMARY
-          echo "_Python 3.13 · $(date -u '+%Y-%m-%d %H:%M UTC')_" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          for platform in windows ubuntu; do
-            if [ "$platform" = "windows" ]; then
-              echo "### 🪟 Windows (win_amd64)" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "### 🐧 Ubuntu 24.04 / WSL2" >> $GITHUB_STEP_SUMMARY
-            fi
-            echo '| Wheel |' >> $GITHUB_STEP_SUMMARY
-            echo '|-------|' >> $GITHUB_STEP_SUMMARY
-            ls summary/$platform/*.whl 2>/dev/null | sort | xargs -I{} basename {} | \
-              while read f; do echo "| \`$f\` |" >> $GITHUB_STEP_SUMMARY; done \
-              || echo "| _(build failed)_ |" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          done
-
-          echo "### Offline install" >> $GITHUB_STEP_SUMMARY
-          echo '```powershell' >> $GITHUB_STEP_SUMMARY
-          echo '# Windows — extract artifact zip, then in that folder:' >> $GITHUB_STEP_SUMMARY
-          echo 'pip install --no-index --find-links . -r requirements-windows.txt' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo '# WSL / Ubuntu — extract artifact, then:' >> $GITHUB_STEP_SUMMARY
-          echo 'bash offline-install.sh' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "✅ Bundle ready: nuitka-offline-bundle-py313"
+          echo ""
+          echo "Contents:"
+          echo "  wheels/           ← all .whl files (pip install offline)"
+          echo "  mingw64.7z        ← C compiler for Nuitka"
+          echo "  install_offline.bat ← run this on the air-gapped machine"
+          echo ""
+          echo "Transfer the artifact to your air-gapped machine and run install_offline.bat"
